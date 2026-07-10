@@ -1,0 +1,48 @@
+'use strict';
+
+const CLIENT_EVENTS = Object.freeze({
+  JOIN_QUEUE: 'JOIN_QUEUE',
+  LEAVE_QUEUE: 'LEAVE_QUEUE',
+  READY: 'READY',
+  PLAYER_ESCAPED: 'PLAYER_ESCAPED',
+  ITEM_USED: 'ITEM_USED',
+  PING: 'PING',
+});
+
+const SERVER_EVENTS = Object.freeze({
+  QUEUE_JOINED: 'QUEUE_JOINED',
+  MATCH_FOUND: 'MATCH_FOUND',
+  COUNTDOWN: 'COUNTDOWN',
+  MATCH_START: 'MATCH_START',
+  MATCH_END: 'MATCH_END',
+  OPPONENT_USED_ITEM: 'OPPONENT_USED_ITEM',
+  OPPONENT_DISCONNECTED: 'OPPONENT_DISCONNECTED',
+  OPPONENT_RECONNECTED: 'OPPONENT_RECONNECTED',
+  ERROR: 'ERROR',
+  PONG: 'PONG',
+});
+
+const MATCH_STATUS = Object.freeze({
+  CREATED: 'created',
+  COUNTDOWN: 'countdown',
+  ACTIVE: 'active',
+  ENDED: 'ended',
+});
+
+const MATCH_END_REASON = Object.freeze({
+  ESCAPED: 'escaped',
+  DISCONNECT_TIMEOUT: 'disconnect_timeout',
+});
+
+const SABOTAGE_ITEMS = Object.freeze({
+  INK_BOMB: 'INK_BOMB',
+  CONFUSION: 'CONFUSION',
+});
+
+module.exports = {
+  CLIENT_EVENTS,
+  SERVER_EVENTS,
+  MATCH_STATUS,
+  MATCH_END_REASON,
+  SABOTAGE_ITEMS,
+};
