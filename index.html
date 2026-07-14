@@ -447,6 +447,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 const CELL_SIZE      = 4.0;   // world units per maze cell
 const WALL_HEIGHT    = 3.2;   // wall height
 const WALL_THICKNESS = 0.45;  // wall thickness
+const WALL_CAP_HEIGHT = 0.1;
+const WALL_CAP_OVERHANG = 0.08;
 const HAMMER_RANGE = 2.1;     // meters; nearby wall directly in front only
 const HAMMER_CHEST_HEIGHT = 1.35;
 const HAMMER_DEBUG_LINE_TIME = 0.45;
@@ -476,14 +478,17 @@ class Maze {
    * @param {number} width  number of cells in X
    * @param {number} height number of cells in Z
    */
-  constructor(width, height, rng = Math.random) {
+  constructor(width, height, rng = Math.random, theme = null) {
     this.width = width;
     this.height = height;
     this.rng = rng;
+    this.theme = theme || getMazeTheme('alien');
+    this._themeTextures = [];
     this.cells = [];           // cells[y][x] = wall bitmask (1 = wall present)
     this.colliders = [];       // axis-aligned wall boxes for collision
     this.group = new THREE.Group();
     this.wallMesh = null;
+    this.wallCapMesh = null;
     this._wallMatrix = new THREE.Matrix4();
     this._colliderByInstance = new Map(); // instanceId -> collider ref
     this._hammerRaycaster = new THREE.Raycaster();
@@ -669,16 +674,38 @@ class Maze {
 
     // Base unit box, scaled per-instance.
     const geo = new THREE.BoxGeometry(1, 1, 1);
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0x6b7488,
-      roughness: 0.85,
-      metalness: 0.05,
+    const wallTexture = this._createThemeTexture(
+      this.theme.wallRepeat?.[0] || 1,
+      this.theme.wallRepeat?.[1] || 1
+    );
+    const wallMaterial = new THREE.MeshStandardMaterial({
+      color: this.theme.wallColor,
+      map: wallTexture,
+      emissive: this.theme.emissive,
+      emissiveMap: wallTexture,
+      emissiveIntensity: this.theme.wallEmissiveIntensity,
+      roughness: this.theme.wallRoughness,
+      metalness: this.theme.wallMetalness,
     });
-    // subtle vertex-color-ish variation via emissive off; keep simple & fast
-    const mesh = new THREE.InstancedMesh(geo, mat, segments.length);
+    const mesh = new THREE.InstancedMesh(geo, wallMaterial, segments.length);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+    // A slightly wider luminous cap makes wall boundaries readable from the
+    // elevated follow camera, even when the textured wall sides are in shadow.
+    const capGeometry = new THREE.BoxGeometry(1, 1, 1);
+    const capMaterial = new THREE.MeshStandardMaterial({
+      color: this.theme.wallCapColor,
+      emissive: this.theme.wallCapEmissive,
+      emissiveIntensity: this.theme.wallCapEmissiveIntensity,
+      roughness: 0.5,
+      metalness: this.theme.wallMetalness * 0.55,
+    });
+    const capMesh = new THREE.InstancedMesh(capGeometry, capMaterial, segments.length);
+    capMesh.castShadow = false;
+    capMesh.receiveShadow = true;
+    capMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
@@ -695,6 +722,23 @@ class Maze {
       m.compose(pos, q, scl);
       mesh.setMatrixAt(i, m);
 
+      pos.set(seg.cx, WALL_HEIGHT + WALL_CAP_HEIGHT / 2, seg.cz);
+      if (seg.horizontal) {
+        scl.set(
+          seg.length + WALL_CAP_OVERHANG * 2,
+          WALL_CAP_HEIGHT,
+          WALL_THICKNESS + WALL_CAP_OVERHANG * 2
+        );
+      } else {
+        scl.set(
+          WALL_THICKNESS + WALL_CAP_OVERHANG * 2,
+          WALL_CAP_HEIGHT,
+          seg.length + WALL_CAP_OVERHANG * 2
+        );
+      }
+      m.compose(pos, q, scl);
+      capMesh.setMatrixAt(i, m);
+
       // collider AABB (in XZ; Y ignored for movement)
       const halfX = (seg.horizontal ? seg.length : WALL_THICKNESS) / 2;
       const halfZ = (seg.horizontal ? WALL_THICKNESS : seg.length) / 2;
@@ -708,8 +752,10 @@ class Maze {
     });
 
     mesh.instanceMatrix.needsUpdate = true;
+    capMesh.instanceMatrix.needsUpdate = true;
     this.wallMesh = mesh;
-    this.group.add(mesh);
+    this.wallCapMesh = capMesh;
+    this.group.add(mesh, capMesh);
 
     this._buildFloor();
     this._buildExitMarker();
@@ -767,8 +813,14 @@ class Maze {
     const W = this.width * CELL_SIZE;
     const H = this.height * CELL_SIZE;
     const geo = new THREE.PlaneGeometry(W, H);
+    const floorTexture = this._createFloorTexture();
     const mat = new THREE.MeshStandardMaterial({
-      color: 0x16181f, roughness: 1.0, metalness: 0.0,
+      color: 0xffffff,
+      map: floorTexture,
+      emissive: this.theme.floorEmissive,
+      emissiveIntensity: this.theme.floorEmissiveIntensity,
+      roughness: this.theme.floorRoughness,
+      metalness: this.theme.floorMetalness,
     });
     const floor = new THREE.Mesh(geo, mat);
     floor.rotation.x = -Math.PI / 2;
@@ -777,11 +829,85 @@ class Maze {
     this.group.add(floor);
 
     // faint grid for depth perception
-    const grid = new THREE.GridHelper(Math.max(W, H), Math.max(this.width, this.height), 0x2a2f3a, 0x20242d);
+    const grid = new THREE.GridHelper(
+      Math.max(W, H),
+      Math.max(this.width, this.height),
+      this.theme.gridMajor,
+      this.theme.gridMinor
+    );
     grid.position.set(W / 2, 0.02, H / 2);
-    grid.material.opacity = 0.25;
+    grid.material.opacity = 0.42;
     grid.material.transparent = true;
     this.group.add(grid);
+  }
+
+  _createFloorTexture() {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const pattern = this.theme.floorPattern;
+
+    ctx.fillStyle = pattern.base;
+    ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = pattern.panel;
+    ctx.fillRect(10, 10, size - 20, size - 20);
+    ctx.strokeStyle = pattern.line;
+    ctx.lineWidth = 6;
+    ctx.strokeRect(3, 3, size - 6, size - 6);
+    ctx.lineWidth = 2;
+    ctx.strokeRect(18, 18, size - 36, size - 36);
+
+    if (this.theme.id === 'alien') {
+      ctx.strokeStyle = pattern.detail;
+      ctx.lineWidth = 4;
+      for (const [x, y] of [[0, 0], [size, 0], [0, size], [size, size]]) {
+        ctx.beginPath();
+        ctx.arc(x, y, 66, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.ellipse(size / 2, size / 2, 38, 58, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (this.theme.id === 'cyberpunk') {
+      ctx.strokeStyle = pattern.detail;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(30, 82); ctx.lineTo(78, 82); ctx.lineTo(96, 64);
+      ctx.moveTo(160, 192); ctx.lineTo(178, 174); ctx.lineTo(226, 174);
+      ctx.stroke();
+      ctx.fillStyle = pattern.accent;
+      for (const [x, y] of [[30, 30], [226, 30], [30, 226], [226, 226]]) {
+        ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+      }
+    } else {
+      ctx.strokeStyle = pattern.detail;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(18, 110); ctx.lineTo(62, 92); ctx.lineTo(104, 112); ctx.lineTo(148, 88);
+      ctx.moveTo(108, 238); ctx.lineTo(124, 188); ctx.lineTo(174, 158); ctx.lineTo(238, 146);
+      ctx.stroke();
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(this.width, this.height);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    this._themeTextures.push(texture);
+    return texture;
+  }
+
+  _createThemeTexture(repeatX, repeatY) {
+    const texture = new THREE.TextureLoader().load(this.theme.texture);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(repeatX, repeatY);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    this._themeTextures.push(texture);
+    return texture;
   }
 
   _buildExitMarker() {
@@ -936,6 +1062,10 @@ class Maze {
       this._wallMatrix.setPosition(0, -9999, 0);
       this.wallMesh.setMatrixAt(col.instanceId, this._wallMatrix);
       this.wallMesh.instanceMatrix.needsUpdate = true;
+      if (this.wallCapMesh) {
+        this.wallCapMesh.setMatrixAt(col.instanceId, this._wallMatrix);
+        this.wallCapMesh.instanceMatrix.needsUpdate = true;
+      }
     }
   }
 
@@ -960,6 +1090,8 @@ class Maze {
         else obj.material.dispose();
       }
     });
+    this._themeTextures.forEach(texture => texture.dispose());
+    this._themeTextures.length = 0;
   }
 }
 
@@ -993,7 +1125,7 @@ class Player {
 
     // Dynamic "lantern" that follows the player — the heart of the visibility
     // system. Bright core for clear nearby sight, gentle decay for falloff.
-    this.light = new THREE.PointLight(0xffe6b8, 3.0, VISION_RADIUS * 2.6, 1.3);
+    this.light = new THREE.PointLight(0xffe6b8, 9.0, VISION_RADIUS * 2.6, 1.3);
     this.light.position.set(0, 2.4, 0);
     this.light.castShadow = true;
     this.light.shadow.mapSize.set(1024, 1024);
@@ -1004,7 +1136,7 @@ class Player {
 
     // Wide, soft fill light (no shadow) so the lantern pool reads as a smooth
     // bright→dim gradient instead of a harsh spot.
-    this.fillLight = new THREE.PointLight(0xbcd0ff, 1.2, VISION_RADIUS * 1.5, 1.1);
+    this.fillLight = new THREE.PointLight(0xbcd0ff, 3.2, VISION_RADIUS * 1.5, 1.1);
     this.fillLight.position.set(0, 2.6, 0);
     this.group.add(this.fillLight);
 
@@ -1103,7 +1235,7 @@ class Player {
     if (this.legR) this.legR.rotation.x = -swing;
 
     // gentle lantern flicker around its base intensity
-    this.light.intensity = 3.0 + Math.sin(performance.now() * 0.006) * 0.18;
+    this.light.intensity = 9.0 + Math.sin(performance.now() * 0.006) * 0.35;
   }
 
   // Move along one axis, then resolve against wall AABBs.
@@ -1954,6 +2086,51 @@ const PATH_REVEAL_DURATION = 5;  // seconds
 const VISION_DURATION  = 10; // seconds
 const SABOTAGE_DURATION = 5; // seconds
 
+const MAZE_THEMES = Object.freeze({
+  alien: Object.freeze({
+    id: 'alien', name: 'Alien Hive', texture: 'assets/themes/alien.png',
+    background: 0x06110f, ambient: 0x65d7b0, sky: 0x54e6cf, ground: 0x07140d,
+    wallColor: 0xd0e2dc, emissive: 0x20d9a8, wallCapColor: 0x8adacb,
+    wallCapEmissive: 0x1f6e61, wallCapEmissiveIntensity: 0.75,
+    floorEmissive: 0x173f38, floorEmissiveIntensity: 0.18,
+    floorPattern: { base: '#315a54', panel: '#294c47', line: '#6ba99d', detail: '#4f857c', accent: '#9ce3d3' },
+    wallEmissiveIntensity: 0.28,
+    wallRoughness: 0.58, wallMetalness: 0.5, floorRoughness: 0.72, floorMetalness: 0.25,
+    wallRepeat: [1.25, 1], gridMajor: 0x8ed8ca, gridMinor: 0x3e766d,
+  }),
+  cyberpunk: Object.freeze({
+    id: 'cyberpunk', name: 'Cyberpunk Grid', texture: 'assets/themes/cyberpunk.png',
+    background: 0x080713, ambient: 0x7a7bd8, sky: 0x22dfff, ground: 0x19071f,
+    wallColor: 0xe4e5f1, emissive: 0x3b75ff, wallCapColor: 0x8cc4d8,
+    wallCapEmissive: 0x2bd7ff, wallCapEmissiveIntensity: 0.65,
+    floorEmissive: 0x172c46, floorEmissiveIntensity: 0.2,
+    floorPattern: { base: '#34445b', panel: '#29384d', line: '#7392aa', detail: '#39a8c0', accent: '#74e7f1' },
+    wallEmissiveIntensity: 0.34,
+    wallRoughness: 0.48, wallMetalness: 0.7, floorRoughness: 0.6, floorMetalness: 0.55,
+    wallRepeat: [1.2, 1], gridMajor: 0x91c7d9, gridMinor: 0x496b83,
+  }),
+  forest: Object.freeze({
+    id: 'forest', name: 'Overgrown Ruins', texture: 'assets/themes/forest.png',
+    background: 0x071008, ambient: 0x8dbb74, sky: 0x7ba06c, ground: 0x17200f,
+    wallColor: 0xd4dbc7, emissive: 0xb88727, wallCapColor: 0xb7c58d,
+    wallCapEmissive: 0x43552b, wallCapEmissiveIntensity: 0.45,
+    floorEmissive: 0x3c3725, floorEmissiveIntensity: 0.16,
+    floorPattern: { base: '#625e48', panel: '#514f3f', line: '#9a9271', detail: '#7d8562', accent: '#d2b46b' },
+    wallEmissiveIntensity: 0.12,
+    wallRoughness: 0.96, wallMetalness: 0.0, floorRoughness: 1.0, floorMetalness: 0.0,
+    wallRepeat: [1.15, 1], gridMajor: 0xb0b784, gridMinor: 0x676b4d,
+  }),
+});
+const MAZE_THEME_IDS = Object.freeze(Object.keys(MAZE_THEMES));
+
+function randomThemeId() {
+  return MAZE_THEME_IDS[Math.floor(Math.random() * MAZE_THEME_IDS.length)];
+}
+
+function getMazeTheme(themeId) {
+  return MAZE_THEMES[themeId] || MAZE_THEMES.alien;
+}
+
 // ====== Engine globals ======
 let renderer, scene, camera, clock;
 let maze, player, followCam, items, ui, minimap, pathReveal;
@@ -1964,6 +2141,7 @@ const gameConfig = {
   mazeHeight: MAZE_HEIGHT,
   seed: null,
   difficulty: 'offline',
+  themeId: randomThemeId(),
 };
 
 // ====== Game state ======
@@ -1991,8 +2169,6 @@ const input = { forward: false, back: false, left: false, right: false, sprint: 
 // survives as faint silhouettes (fog colour is a dark blue, not pure black).
 const FOG_NEAR = VISION_RADIUS * 0.85;   // ~15m fully clear
 const FOG_FAR  = VISION_RADIUS * 2.4;    // ~43m before it reads as dark
-const BG_COLOR = 0x0b0f18;
-
 init();
 
 function init() {
@@ -2027,7 +2203,7 @@ function init() {
   ui.hideLoading();
 
   // start button
-  document.getElementById('start-btn').addEventListener('click', startGame);
+  document.getElementById('start-btn').addEventListener('click', startOfflineGame);
   document.getElementById('play-online-btn').addEventListener('click', startOnlineMatch);
   document.getElementById('settings-btn').addEventListener('click', () => ui.toast('Settings coming soon'));
   document.getElementById('cancel-search-btn').addEventListener('click', cancelOnlineSearch);
@@ -2052,6 +2228,10 @@ function init() {
       get camera() { return camera; },
       onPickup,
     };
+    if (location.search.includes('autostart')) {
+      const forcedTheme = new URLSearchParams(location.search).get('theme');
+      setTimeout(() => startOfflineGame(forcedTheme), 0);
+    }
   }
 
   animate();
@@ -2061,20 +2241,21 @@ function init() {
 // World construction / teardown
 // ---------------------------------------------------------
 function buildWorld() {
+  const theme = getMazeTheme(gameConfig.themeId);
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(BG_COLOR);
-  scene.fog = new THREE.Fog(BG_COLOR, FOG_NEAR, FOG_FAR);
+  scene.background = new THREE.Color(theme.background);
+  scene.fog = new THREE.Fog(theme.background, FOG_NEAR, FOG_FAR);
 
   // Raised ambient so nothing is ever pitch-black — distant walls stay readable
   // as silhouettes; the player's lantern provides the bright near-field.
-  scene.add(new THREE.AmbientLight(0x6d7891, 0.55));
+  scene.add(new THREE.AmbientLight(theme.ambient, 0.75));
   // cool sky / warm-ish ground fill for shape definition
-  const hemi = new THREE.HemisphereLight(0x5a6a99, 0x141820, 0.55);
+  const hemi = new THREE.HemisphereLight(theme.sky, theme.ground, 0.7);
   scene.add(hemi);
 
   const seededRandom = gameConfig.seed == null ? null : new SeededRandom(gameConfig.seed);
   const rng = seededRandom ? seededRandom.next.bind(seededRandom) : Math.random;
-  maze = new Maze(gameConfig.mazeWidth, gameConfig.mazeHeight, rng);
+  maze = new Maze(gameConfig.mazeWidth, gameConfig.mazeHeight, rng, theme);
   maze.build(scene);
 
   player = new Player(maze);
@@ -2125,14 +2306,24 @@ function rebuild() {
 // ---------------------------------------------------------
 // Game flow
 // ---------------------------------------------------------
-function configureOfflineGame() {
+function configureOfflineGame(themeId = null) {
   state.mode = 'offline';
   state.onlineStatus = 'Offline';
   gameConfig.mazeWidth = MAZE_WIDTH;
   gameConfig.mazeHeight = MAZE_HEIGHT;
   gameConfig.seed = null;
   gameConfig.difficulty = 'offline';
+  gameConfig.themeId = typeof themeId === 'string' && MAZE_THEMES[themeId]
+    ? themeId
+    : randomThemeId();
   if (ui) ui.setOnlineStatus('Offline', false);
+}
+
+function startOfflineGame(themeId = null) {
+  configureOfflineGame(themeId);
+  rebuild();
+  startGame();
+  ui.toast(getMazeTheme(gameConfig.themeId).name);
 }
 
 async function startOnlineMatch() {
@@ -2149,7 +2340,9 @@ async function startOnlineMatch() {
     },
     onMatchFound: (match) => {
       applyMatchConfig(match);
+      const matchThemeName = getMazeTheme(match.themeId).name;
       ui.showSearching('Match Found', `Room ${match.roomId.slice(0, 13)} · ${match.difficulty}`);
+      ui.setSearchingStatus(`${match.difficulty} | ${matchThemeName}`);
     },
     onCountdown: (remaining) => {
       ui.showSearching('Match Starting', String(remaining));
@@ -2158,6 +2351,7 @@ async function startOnlineMatch() {
     onMatchStart: () => {
       rebuild();
       startGame();
+      ui.toast(getMazeTheme(gameConfig.themeId).name);
       ui.setOnlineStatus(`Room ${networkManager.match.roomId.slice(0, 13)} · Racing`, true);
     },
     onMatchEnd: handleOnlineMatchEnd,
@@ -2208,6 +2402,7 @@ function applyMatchConfig(match) {
   gameConfig.difficulty = match.difficulty;
   gameConfig.mazeWidth = match.mazeSize.width;
   gameConfig.mazeHeight = match.mazeSize.height;
+  gameConfig.themeId = match.themeId;
 }
 
 function handleOnlineMatchEnd(result) {

@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { MATCH_STATUS, MATCH_END_REASON } = require('../../shared/events');
 
 const RECONNECT_GRACE_MS = 30_000;
+const MAZE_THEME_IDS = Object.freeze(['alien', 'cyberpunk', 'forest']);
 
 class RoomManager {
   constructor(io) {
@@ -18,6 +19,7 @@ class RoomManager {
     const seed = crypto.randomInt(1, 2 ** 31 - 1);
     const difficulty = this._pickDifficulty();
     const mazeSize = this._mazeSizeForDifficulty(difficulty);
+    const themeId = MAZE_THEME_IDS[crypto.randomInt(0, MAZE_THEME_IDS.length)];
     const now = Date.now();
 
     const room = {
@@ -27,6 +29,7 @@ class RoomManager {
       seed,
       difficulty,
       mazeSize,
+      themeId,
       status: MATCH_STATUS.CREATED,
       winnerSocketId: null,
       winnerPlayerId: null,

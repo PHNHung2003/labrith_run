@@ -88,6 +88,7 @@ function matchPayloadFor(room, socketId) {
     seed: room.seed,
     difficulty: room.difficulty,
     mazeSize: room.mazeSize,
+    themeId: room.themeId,
     serverTime: Date.now(),
   };
 }
